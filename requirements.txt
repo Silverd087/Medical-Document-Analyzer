@@ -1,0 +1,8 @@
+langchain==0.1.12
+langchain-community==0.0.27
+chromadb==0.4.24
+PyPDF2==3.0.1
+PyMuPDF==1.23.26
+psutil==5.9.8
+streamlit==1.32.2
+ollama==0.1.7
