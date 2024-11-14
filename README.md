@@ -63,12 +63,14 @@ streamlit run interface.py
 
 ## Project Structure
 
+```plaintext
 medical-document-analyzer/
-├── app.py # Core processing logic
-├── interface.py # Streamlit interface
-├── requirements.txt # Project dependencies
-├── README.md # Project documentation
-└── .gitignore # Git ignore rules
+├── app.py                # Core processing logic
+├── interface.py          # Streamlit interface
+├── requirements.txt      # Project dependencies
+├── README.md            # Project documentation
+└── .gitignore           # Git ignore rules
+```
 
 ## License
 
