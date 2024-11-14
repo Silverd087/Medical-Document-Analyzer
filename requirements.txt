@@ -6,3 +6,4 @@ PyMuPDF==1.23.26
 psutil==5.9.8
 streamlit==1.32.2
 ollama==0.1.7
+reportlab==4.1.0

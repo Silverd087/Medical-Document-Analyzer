@@ -3,6 +3,12 @@ from io import StringIO
 from pathlib import Path
 import tempfile
 from app import DocumentProcessor  # Your existing code in a separate file
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from io import BytesIO
+import datetime
 
 def create_temp_file(uploaded_file):
     """Create a temporary file from uploaded content"""
@@ -112,6 +118,138 @@ def process_with_status(processor, input_source, status_placeholder):
         status_placeholder.text("Status: Error ❌")
         raise e
 
+def format_markdown_text(text: str) -> str:
+    """Convert markdown text to formatted text"""
+    # Replace markdown list items with proper bullet points
+    lines = text.split('\n')
+    formatted_lines = []
+    
+    for line in lines:
+        # Handle bullet points
+        if line.strip().startswith('*') or line.strip().startswith('-'):
+            line = '• ' + line.strip()[1:].strip()
+        
+        # Handle headers
+        if line.strip().startswith('#'):
+            line = line.strip().lstrip('#').strip()
+            
+        formatted_lines.append(line)
+    
+    return '\n'.join(formatted_lines)
+
+def create_pdf_report(results: dict) -> bytes:
+    """Create a well-formatted PDF report of the results"""
+    buffer = BytesIO()
+    
+    # Create the PDF document
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=72,
+        leftMargin=72,
+        topMargin=72,
+        bottomMargin=72
+    )
+    
+    # Get styles
+    styles = getSampleStyleSheet()
+    
+    # Create custom styles
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        spaceAfter=30,
+        textColor=colors.HexColor('#2c3e50')
+    )
+    
+    heading_style = ParagraphStyle(
+        'CustomHeading',
+        parent=styles['Heading2'],
+        fontSize=16,
+        spaceAfter=12,
+        textColor=colors.HexColor('#34495e')
+    )
+    
+    body_style = ParagraphStyle(
+        'CustomBody',
+        parent=styles['Normal'],
+        fontSize=12,
+        spaceAfter=12,
+        leading=14,
+        bulletIndent=20,
+        leftIndent=20
+    )
+    
+    bullet_style = ParagraphStyle(
+        'BulletStyle',
+        parent=body_style,
+        leftIndent=30,
+        firstLineIndent=0,
+        spaceBefore=5,
+        spaceAfter=5
+    )
+    
+    # Create the document content
+    content = []
+    
+    # Title
+    content.append(Paragraph("Medical Document Analysis Report", title_style))
+    content.append(Paragraph(f"Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Italic']))
+    content.append(Spacer(1, 20))
+    
+    # Summary Section
+    content.append(Paragraph("Summary", heading_style))
+    formatted_summary = format_markdown_text(results["summary"])
+    paragraphs = formatted_summary.split('\n')
+    for p in paragraphs:
+        if p.strip().startswith('•'):
+            content.append(Paragraph(p, bullet_style))
+        else:
+            content.append(Paragraph(p, body_style))
+    content.append(Spacer(1, 20))
+    
+    # Entities Section
+    content.append(Paragraph("Extracted Medical Entities", heading_style))
+    formatted_entities = format_markdown_text(results["entities"])
+    paragraphs = formatted_entities.split('\n')
+    for p in paragraphs:
+        if p.strip().startswith('•'):
+            content.append(Paragraph(p, bullet_style))
+        else:
+            content.append(Paragraph(p, body_style))
+    content.append(Spacer(1, 20))
+    
+    # Enhanced Insights Section
+    content.append(Paragraph("Enhanced Insights", heading_style))
+    formatted_insights = format_markdown_text(results["enhanced_insights"])
+    paragraphs = formatted_insights.split('\n')
+    for p in paragraphs:
+        if p.strip().startswith('•'):
+            content.append(Paragraph(p, bullet_style))
+        else:
+            content.append(Paragraph(p, body_style))
+    content.append(Spacer(1, 20))
+    
+    # Final Assessment Section
+    content.append(Paragraph("Final Assessment", heading_style))
+    formatted_assessment = format_markdown_text(results["final_assessment"])
+    paragraphs = formatted_assessment.split('\n')
+    for p in paragraphs:
+        if p.strip().startswith('•'):
+            content.append(Paragraph(p, bullet_style))
+        else:
+            content.append(Paragraph(p, body_style))
+    
+    # Build the PDF
+    doc.build(content)
+    
+    # Get the value of the BytesIO buffer
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    
+    return pdf_bytes
+
 def main():
     st.set_page_config(
         page_title="Medical Document Analyzer",
@@ -197,9 +335,29 @@ def main():
                     except Exception as e:
                         st.error(f"Processing error: {str(e)}")
         
-        # Add download button if results exist
+        # First display the results
         if st.session_state.results:
-            if st.button("Download Complete Results"):
+            st.header("Analysis Results")
+            display_results(st.session_state.results)
+            
+            # Then add download buttons below the results
+            st.markdown("---")
+            st.subheader("Download Options")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # PDF Download
+                pdf_bytes = create_pdf_report(st.session_state.results)
+                st.download_button(
+                    label="📄 Download as PDF",
+                    data=pdf_bytes,
+                    file_name="medical_analysis_report.pdf",
+                    mime="application/pdf",
+                    key="pdf_download"  # Add unique key
+                )
+            
+            with col2:
+                # Text Download
                 results_text = f"""Medical Document Analysis Results
 
 SUMMARY:
@@ -215,10 +373,11 @@ FINAL ASSESSMENT:
 {st.session_state.results['final_assessment']}
 """
                 st.download_button(
-                    label="Download Results as Text",
+                    label="📝 Download as Text",
                     data=results_text,
                     file_name="medical_analysis_results.txt",
-                    mime="text/plain"
+                    mime="text/plain",
+                    key="text_download"  # Add unique key
                 )
     
     except Exception as e:
