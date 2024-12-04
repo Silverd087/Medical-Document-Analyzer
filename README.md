@@ -51,6 +51,7 @@ A Streamlit application that analyzes medical documents using local LLMs through
    ollama pull mistral
    ollama pull neural-chat
    ollama pull openchat
+   ollama pull llama3.2:3b
    ```
 
 ## Usage
