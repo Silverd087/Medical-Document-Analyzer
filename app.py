@@ -14,6 +14,8 @@ from typing import Union, TextIO
 import fitz  # PyMuPDF for better PDF handling
 from io import StringIO
 import shutil
+import hashlib
+import datetime
 
 class ModelManager:
     def __init__(self):
@@ -145,15 +147,82 @@ class DocumentLoader:
 
 class DocumentProcessor:
     def __init__(self):
-        self.model_manager = ModelManager()
+        # Initialize model names first
         self.model_names = {
             "summarizer": "llama2",
             "ner": "mistral",
             "rag": "neural-chat",
             "judge": "openchat",
-            "embeddings": "mistral"
+            "embeddings": "mistral",
+            "chat": "llama3.2:3b"
         }
+        
+        # Initialize model manager
+        self.model_manager = ModelManager()
+        
+        # Initialize document loader
         self.document_loader = DocumentLoader()
+        
+        # Add persistent vector store path
+        self.persist_directory = "persistent_vectorstore"
+        self.collection_name = "medical_documents"
+        
+        # Initialize vector store
+        self._initialize_vectorstore()
+        
+        # Add system prompt for medical chat
+        self.system_prompt = """
+        You are MedAssist-GPT, an AI medical assistant focused on providing general medical information and guidance. You excel in:
+
+        Specializations:
+        - General medical knowledge and terminology
+        - Basic symptom assessment
+        - Health education and prevention
+        - Medical document analysis
+        - Understanding medical research
+
+        Guidelines:
+        - Always provide clear, accurate medical information
+        - Include appropriate disclaimers when necessary
+        - Emphasize the importance of consulting healthcare professionals
+        - Be clear about limitations and uncertainties
+        - Use medical terminology appropriately, with explanations
+        - For document analysis, provide detailed, structured analysis
+
+        Important Disclaimers:
+        - You cannot provide definitive diagnoses
+        - You cannot prescribe medications
+        - You cannot replace professional medical advice
+        - You must emphasize seeking professional medical care for serious concerns
+
+        Remember: Your role is to provide information and guidance while emphasizing the importance of professional medical care.
+        """
+
+    def _initialize_vectorstore(self):
+        """Initialize or load the persistent vector store"""
+        print("\n=== Initializing Vector Store ===")
+        if not os.path.exists(self.persist_directory):
+            os.makedirs(self.persist_directory)
+            print(f"Created persistent directory: {self.persist_directory}")
+        
+        # Initialize embeddings
+        self.embeddings = OllamaEmbeddings(model=self.model_names["embeddings"])
+        
+        # Create or load vector store
+        try:
+            self.vectorstore = Chroma(
+                persist_directory=self.persist_directory,
+                embedding_function=self.embeddings,
+                collection_name=self.collection_name
+            )
+            print(f"Vector store loaded with {self.vectorstore._collection.count()} documents")
+        except Exception as e:
+            print(f"Error loading vector store: {e}")
+            self.vectorstore = None
+
+    def _get_document_hash(self, text: str) -> str:
+        """Create a hash of the document text to check for duplicates"""
+        return hashlib.md5(text.encode()).hexdigest()
 
     def summarize_text(self, text: str) -> str:
         """Generate a medical-focused summary using Llama 2"""
@@ -195,134 +264,141 @@ class DocumentProcessor:
             [Prescribed treatments, medications, and follow-up plans]
             
             ADDITIONAL NOTES:
-            [Any other clinically relevant information]"""
-            
-            try:
-                summary = summarizer.invoke(prompt)
-                
-                # Verify summary quality
-                verification_prompt = f"""Review the generated summary and verify:
-                1. Are all critical medical details preserved?
-                2. Is the medical terminology accurate?
-                3. Are all numerical values correctly maintained?
-                
-                If any issues are found, regenerate the summary addressing these issues.
-                
-                Original Summary:
-                {summary}
-                
-                Verification Result:"""
-                
-                verification = summarizer.invoke(verification_prompt)
-                
-                # If verification indicates issues, regenerate
-                if "issue" in verification.lower() or "error" in verification.lower():
-                    summary = summarizer.invoke(prompt)
-                
-                return summary
-                
-            except Exception as e:
-                print(f"Error during summarization: {str(e)}")
-                # Fallback to a simpler prompt if the detailed one fails
-                fallback_prompt = f"""Provide a clear medical summary of the following text, 
-                focusing on key symptoms, diagnoses, and treatments:
-                
-                {text}"""
-                return summarizer.invoke(fallback_prompt)
+        [Any other clinically relevant information]"""
+        
+        return summarizer.invoke(prompt)
+
 
     def extract_entities(self, text: str) -> str:
         """Extract named entities, especially focusing on symptoms"""
         with self.model_manager.load_model(self.model_names["ner"]) as ner_model:
-            prompt = f"""Extract key medical entities from the text, focusing on:
-            - Symptoms
-            - Conditions
-            - Treatments
-            - Medications
+            prompt = f"""
+            You are a medical report analyzer specialized in extracting structured medical information. 
+            From the provided text, extract and list key entities under the following categories:
+            - Symptoms: Briefly describe any symptoms mentioned.
+            - Conditions: List specific medical conditions or diagnoses.
+            - Treatments: Include any mentioned procedures, therapies, or interventions.
+            - Medications: Extract names of drugs, dosages, or prescriptions.
+            Ensure your response is concise, clearly categorized, and directly answers the query.
             
-            Text: {text}"""
+            Text to analyze:
+            {text}
+            
+            Output format:
+            Symptoms: <list of symptoms>/n
+            Conditions: <list of conditions>/n
+            Treatments: <list of treatments>/n
+            Medications: <list of medications>/n
+            """
             return ner_model.invoke(prompt)
 
-    def enhance_with_rag(self, text: str, summary: str, entities: str) -> str:
-        """Use RAG to enhance the analysis"""
-        import uuid
-        import time
-        
-        # Create a unique directory for this session
-        session_id = str(uuid.uuid4())
-        persist_directory = f"chroma_db_{session_id}"
+    def enhance_with_rag(self, text: str, summary: str, entities: str, is_query: bool = False) -> str:
+        """Use RAG to enhance the analysis or answer queries"""
+        print("\n=== Starting RAG Process ===")
         
         try:
-            # Create directory if it doesn't exist
-            if not os.path.exists(persist_directory):
-                os.makedirs(persist_directory)
-            
-            # First load embeddings model and create embeddings
-            embeddings = OllamaEmbeddings(model=self.model_names["embeddings"])
-            
-            # Create vector store with persistence
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=512,
-                chunk_overlap=50
-            )
-            chunks = text_splitter.split_text(text)[:40]  # Limit chunks
-            
-            # Create and use vectorstore
-            vectorstore = None
-            try:
-                vectorstore = Chroma.from_texts(
-                    texts=chunks,
-                    embedding=embeddings,
-                    persist_directory=persist_directory,
-                    collection_name=f"medical_docs_{session_id}"
+            if not is_query:
+                # Regular document processing
+                doc_hash = self._get_document_hash(text)
+                metadata = {
+                    "hash": doc_hash,
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "summary": summary,
+                    "entities": entities
+                }
+                
+                # Check if document already exists
+                existing_docs = self.vectorstore._collection.get(
+                    where={"hash": doc_hash}
                 )
                 
-                # Then load RAG model separately
-                with self.model_manager.load_model(self.model_names["rag"]) as rag_model:
-                    retriever = vectorstore.as_retriever()
-                    qa_chain = RetrievalQA.from_chain_type(
-                        llm=rag_model,
-                        chain_type="stuff",
-                        retriever=retriever
+                if not existing_docs['ids']:
+                    print("\nNew document detected, adding to vector store...")
+                    # Modified text splitter configuration
+                    text_splitter = RecursiveCharacterTextSplitter(
+                        chunk_size=1000,  # Increased chunk size
+                        chunk_overlap=200,  # Increased overlap
+                        length_function=len,
+                        separators=["\n\n", "\n", " ", ""],
+                        is_separator_regex=False
                     )
                     
+                    # Clean and preprocess text
+                    cleaned_text = self._preprocess_text(text)
+                    
+                    # Split text and validate chunks
+                    chunks = text_splitter.split_text(cleaned_text)
+                    valid_chunks = self._validate_chunks(chunks)
+                    
+                    if valid_chunks:
+                        print(f"Split text into {len(valid_chunks)} valid chunks")
+                        # Add chunks with individual metadata
+                        self.vectorstore.add_texts(
+                            texts=valid_chunks,
+                            metadatas=[{
+                                **metadata,
+                                "chunk_index": i,
+                                "total_chunks": len(valid_chunks)
+                            } for i in range(len(valid_chunks))]
+                        )
+                        print("Document added to vector store")
+                    else:
+                        print("Warning: No valid chunks generated")
+                else:
+                    print("\nDocument already exists in vector store")
+            
+            # Get relevant chunks for either document analysis or query
+            print(f"\nSearching vector store with {self.vectorstore._collection.count()} documents")
+            retriever = self.vectorstore.as_retriever(
+                search_kwargs={"k": 10}
+            )
+            
+            query = text if is_query else f"""Based on the following information:
+            Summary: {summary}
+            Extracted Entities: {entities}"""
+            
+            relevant_docs = retriever.get_relevant_documents(query)
+            
+            if len(relevant_docs) > 0:
+                print("\nFound relevant information in database:")
+                for i, doc in enumerate(relevant_docs, 1):
+                    print(f"\nChunk {i}:")
+                    print("-" * 50)
+                    print(doc.page_content.strip())
+                    print("-" * 50)
+            else:
+                print("\nNo relevant information found in database")
+            
+            # Perform RAG analysis
+            print("\nStarting RAG analysis...")
+            with self.model_manager.load_model(self.model_names["rag"]) as rag_model:
+                print("RAG model loaded")
+                qa_chain = RetrievalQA.from_chain_type(
+                    llm=rag_model,
+                    chain_type="stuff",
+                    retriever=retriever
+                )
+                
+                if is_query:
+                    prompt = f"""Using the retrieved medical documents as context, please answer the following question:
+                    {text}
+                    
+                    If the database doesn't contain relevant information, please indicate that and provide a general response based on your knowledge."""
+                else:
                     prompt = f"""Based on the following information:
                     Summary: {summary}
                     Extracted Entities: {entities}
                     
                     Please provide additional insights and context."""
-                    
-                    result = qa_chain.run(prompt)
-                    return result
-                    
-            finally:
-                # Properly close and cleanup vectorstore
-                if vectorstore is not None:
-                    try:
-                        vectorstore.delete_collection()
-                        del vectorstore
-                    except Exception as e:
-                        print(f"Error cleaning up vectorstore: {e}")
                 
-                # Force garbage collection
-                gc.collect()
+                print("\nExecuting RAG query...")
+                result = qa_chain.run(prompt)
+                print("RAG analysis completed successfully")
+                return result
                 
-                # Give the system a moment to release file handles
-                time.sleep(1)
-                
-        finally:
-            # Clean up the directory with retries
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    if os.path.exists(persist_directory):
-                        # On Windows, sometimes we need to retry due to file handles
-                        shutil.rmtree(persist_directory, ignore_errors=True)
-                        time.sleep(1)  # Give OS time to release handles
-                    break
-                except Exception as e:
-                    if attempt == max_retries - 1:  # Last attempt
-                        print(f"Warning: Could not remove temporary directory {persist_directory}: {e}")
-                    time.sleep(1)  # Wait before retry
+        except Exception as e:
+            print(f"Error in RAG process: {e}")
+            raise e
 
     def judge_results(self, summary: str, entities: str, rag_insights: str) -> str:
         """Use judge model to evaluate and combine all results"""
@@ -340,7 +416,7 @@ class DocumentProcessor:
             return judge_model.invoke(prompt)
 
     def process_input(self, input_source: Union[str, Path, TextIO]) -> dict:
-        """Process either a file path or text content"""
+        """Process document using full pipeline"""
         try:
             # Load and extract text
             text = self.document_loader.load(input_source)
@@ -351,12 +427,15 @@ class DocumentProcessor:
             # Process the text through the pipeline
             results = {}
             
+            # Step 1: Summarization
             print("Starting summarization...")
             results["summary"] = self.summarize_text(text)
             
+            # Step 2: Entity extraction
             print("Starting entity extraction...")
             results["entities"] = self.extract_entities(text)
             
+            # Step 3: RAG analysis
             print("Starting RAG analysis...")
             results["enhanced_insights"] = self.enhance_with_rag(
                 text, 
@@ -364,6 +443,7 @@ class DocumentProcessor:
                 results["entities"]
             )
             
+            # Step 4: Final assessment (should be last)
             print("Starting final assessment...")
             results["final_assessment"] = self.judge_results(
                 results["summary"],
@@ -371,11 +451,88 @@ class DocumentProcessor:
                 results["enhanced_insights"]
             )
             
-            return results
+            # Return final results
+            return {
+                "type": "document",
+                "content": results
+            }
             
         except Exception as e:
             print(f"Error during processing: {str(e)}")
             raise
+
+    def clear_vectorstore(self):
+        """Clear the entire vector store - use with caution"""
+        try:
+            if self.vectorstore is not None:
+                self.vectorstore._collection.delete(where={})
+                print("Vector store cleared successfully")
+        except Exception as e:
+            print(f"Error clearing vector store: {e}")
+
+    def query_database(self, query: str) -> str:
+        """Query the medical document database directly"""
+        print(f"\n=== Processing Query: {query} ===")
+        return self.enhance_with_rag(query, "", "", is_query=True)
+
+    def chat(self, message: str, chat_history: list = None) -> dict:
+        """Handle chat interactions"""
+        if chat_history is None:
+            chat_history = []
+            
+        # Regular chat interaction - using only llama3.2:3b
+        print("\n=== Processing Chat Message ===")
+        with self.model_manager.load_model(self.model_names["chat"]) as chat_model:
+            prompt = f"""You are MedAssist-GPT, an AI medical assistant. Please provide a helpful response to the following message, while keeping in mind:
+            1. You cannot provide diagnoses
+            2. You cannot prescribe medications
+            3. You must emphasize consulting healthcare professionals for serious concerns
+            4. Be clear about any limitations or uncertainties
+
+            Previous conversation:
+            {' '.join([f"{msg['role']}: {msg['content']}" for msg in chat_history[-3:]])}
+
+            User: {message}
+
+            Assistant:"""
+            
+            response = chat_model.invoke(prompt)
+            return {
+                "type": "chat",
+                "content": response
+            }
+
+    def _preprocess_text(self, text: str) -> str:
+        """Clean and preprocess text before chunking"""
+        # Only remove non-printable characters while preserving spaces and punctuation
+        cleaned_text = ''.join(char if char.isprintable() or char == '\n' else ' ' for char in text)
+        
+        # Normalize line endings (but keep the newlines)
+        cleaned_text = cleaned_text.replace('\r\n', '\n')
+        
+        # Remove any resulting double spaces (from non-printable char replacement)
+        cleaned_text = ' '.join(filter(None, cleaned_text.split(' ')))
+        
+        return cleaned_text.strip()
+
+    def _validate_chunks(self, chunks: list) -> list:
+        """Validate and filter chunks"""
+        valid_chunks = []
+        min_chunk_length = 100  # Minimum meaningful chunk size
+        
+        for chunk in chunks:
+            # Clean the chunk
+            cleaned_chunk = chunk.strip()
+            
+            # Apply validation criteria
+            if (len(cleaned_chunk) >= min_chunk_length and  # Length check
+                any(char.isalpha() for char in cleaned_chunk) and  # Contains letters
+                not cleaned_chunk.isspace() and  # Not just whitespace
+                len(cleaned_chunk.split()) > 5):  # Minimum word count
+                
+                valid_chunks.append(cleaned_chunk)
+        
+        return valid_chunks
 
 def main():
     processor = DocumentProcessor()
